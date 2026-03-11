@@ -17,6 +17,11 @@ def load_robots(num_robots):
 # This is a manually tuned value that seems to produce a variety of different robot geometries.
 def sample_robot(p=0.55):
     mask = sample_mask(p)
+    return build_robot(mask, p)
+
+# Assemble a robot dict from a mask and fill density.
+# Centralising this here means mutate_with_rate (in my_run.py) can call it too.
+def build_robot(mask, p):
     masses, springs = mask_to_robot(mask)
     masses = masses * SCALE # NOTE: scale of the robot geometry is KEY to stable simulation!
     return {
@@ -24,7 +29,26 @@ def sample_robot(p=0.55):
         "n_springs": springs.shape[0],
         "masses": masses,
         "springs": springs,
+        "mask": mask,   # needed so my_run.py can mutate the shape
+        "p": p,         # needed so my_run.py can perturb the fill density
     }
+
+# Shift the occupied region by a random ±1 step, clamped to the grid boundary.
+def shift_mask(mask):
+    rows, cols = np.where(mask)
+    if len(rows) == 0:
+        return mask
+    dr = int(np.random.randint(-1, 2))
+    dc = int(np.random.randint(-1, 2))
+    dr = int(np.clip(dr, -rows.min(), MASK_DIM - 1 - rows.max()))
+    dc = int(np.clip(dc, -cols.min(), MASK_DIM - 1 - cols.max()))
+    shifted = np.zeros_like(mask)
+    shifted[rows + dr, cols + dc] = 1
+    return shifted
+
+# Add small Gaussian noise to the fill density, clamped to [0.1, 0.9].
+def perturb_p(p):
+    return float(np.clip(p + np.random.normal(scale=0.05), 0.1, 0.9))
 
 # Convert a voxel position to a list of mass coordinates
 # Each voxel has a mass located at each of its four corners
