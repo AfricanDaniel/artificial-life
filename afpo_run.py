@@ -137,7 +137,11 @@ def run_afpo(config, n_generations=20):
     N = config["simulator"]["n_sims"]
     n_random = max(1, int(N * RANDOM_INJECT_FRAC))   # random injections per gen
 
-    os.makedirs("evolution_snapshots", exist_ok=True)
+    # Clear stale snapshots from any previous run so old generations dont bleed through
+    import shutil
+    if os.path.exists("evolution_snapshots"):
+        shutil.rmtree("evolution_snapshots")
+    os.makedirs("evolution_snapshots")
 
     # ── Initialise ────────────────────────────────────────────────────────────
     print("Initializing population (gen 0)...")

@@ -53,6 +53,51 @@ def mutate_with_rate(robot, flip_rate):
     return build_robot(mask, p)
 
 
+
+# ── Composite fitness: forward movement + balance bonus ───────────────────────
+#
+# fitness = forward × (1 + BALANCE_WEIGHT × balance_score)
+#
+# This is ADDITIVE not multiplicative — a robot that moves forward but wobbles
+# still gets credit for moving. Balance is a BONUS on top, not a veto.
+# A robot that falls gets balance_score ≈ 0, so fitness ≈ forward × 1.0
+# A robot that stays perfectly upright gets fitness ≈ forward × (1 + BALANCE_WEIGHT)
+#
+# Tuning:
+#   FALL_THRESHOLD  – CoM must stay above this fraction of starting height
+#   BALANCE_WEIGHT  – how much the balance bonus is worth (0 = ignore balance)
+#
+FALL_THRESHOLD  = 0.55   # 55% of starting CoM height = "fallen"
+BALANCE_WEIGHT  = 0.4    # balance can add up to 40% bonus on top of forward score
+
+
+def compute_balance_scores(sim, n_robots):
+    """Return a balance score in [0,1] per robot from the full CoM-y trajectory."""
+    positions = sim.x.to_numpy()          # (n_sims, steps+1, max_n_masses, 2)
+    n_steps   = int(sim.steps[None])
+    scores    = np.zeros(n_robots, dtype=np.float32)
+    for i in range(n_robots):
+        n_m   = int(sim.n_masses[i])
+        com_y = positions[i, :n_steps + 1, :n_m, 1].mean(axis=1)   # (steps+1,)
+        h0    = float(com_y[0])
+        if h0 < 1e-6:
+            scores[i] = 0.0
+            continue
+        upright_frac = float((com_y > FALL_THRESHOLD * h0).mean())
+        height_ratio = float(np.clip(com_y.mean() / h0, 0.0, 1.5))
+        scores[i]    = upright_frac * height_ratio
+    return scores
+
+
+def composite_fitness(forward, balance):
+    """
+    Additive blend: forward × (1 + BALANCE_WEIGHT × balance_score)
+    Forward is always rewarded; staying upright adds a bonus on top.
+    """
+    forward = np.clip(np.array(forward, dtype=np.float64), 0.0, None)
+    balance = np.clip(np.array(balance, dtype=np.float64), 0.0, 1.0)
+    return forward * (1.0 + BALANCE_WEIGHT * balance)
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Simulator helpers  (same as friends_run.py)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -78,10 +123,12 @@ def build_simulator(robots, config):
 
 
 def evaluate_population(robots, config):
-    """Run one full training pass; return fitnesses, control_params, max_masses, max_springs."""
+    """Train a batch; return composite fitness (forward + balance bonus)."""
     simulator, max_masses, max_springs = build_simulator(robots, config)
     fitness_history = simulator.train()
-    fitnesses       = fitness_history[:, -1]
+    forward         = fitness_history[:, -1]
+    balance         = compute_balance_scores(simulator, len(robots))
+    fitnesses       = composite_fitness(forward, balance)
     control_params  = simulator.get_control_params(list(range(len(robots))))
     return fitnesses, control_params, max_masses, max_springs
 
