@@ -28,7 +28,7 @@ from utils import load_config
 from argparse import ArgumentParser
 from robot import load_robots, build_robot, sample_mask, shift_mask, perturb_p
 import numpy as np
-import os
+import os, json
 from scipy import ndimage
 
 # ── Mutation hyper-parameters ─────────────────────────────────────────────────
@@ -137,11 +137,18 @@ def run_afpo(config, n_generations=20):
     N = config["simulator"]["n_sims"]
     n_random = max(1, int(N * RANDOM_INJECT_FRAC))   # random injections per gen
 
-    # Clear stale snapshots from any previous run so old generations dont bleed through
     import shutil
     if os.path.exists("evolution_snapshots"):
         shutil.rmtree("evolution_snapshots")
     os.makedirs("evolution_snapshots")
+
+    # Lineage tracking: every individual gets a unique id and records its parent_id
+    lineage_nodes = {}   # id -> {gen, fitness, mask, parent_id}
+    _id_counter   = [0]
+
+    def new_id():
+        _id_counter[0] += 1
+        return f"n{_id_counter[0]}"
 
     # ── Initialise ────────────────────────────────────────────────────────────
     print("Initializing population (gen 0)...")
@@ -150,21 +157,21 @@ def run_afpo(config, n_generations=20):
 
     for i, ind in enumerate(population):
         fit = float(fitnesses[i])
-        # --- ADD THIS CHECK ---
         if np.isnan(fit):
             fit = -9999.0
-        # ----------------------
-        ind["fitness"] = fit
-        ind["age"] = 0
+        ind["fitness"]       = fit
+        ind["age"]           = 0
         ind["control_params"] = ctrl_params[i]
         ind["max_n_masses"]  = max_m
         ind["max_n_springs"] = max_s
+        ind["id"]            = new_id()
+        ind["parent_id"]     = None
+        lineage_nodes[ind["id"]] = {
+            "gen": 0, "fitness": fit, "parent_id": None,
+            "mask": ind["mask"].tolist()
+        }
 
-    # Pareto cull the initial population
-    population = pareto_cull(population)
-    # Pad back to N if culling removed too many (keep highest-fitness survivors)
-    if len(population) < N:
-        population = sorted(population, key=lambda x: -x["fitness"])
+    # Do NOT Pareto-cull the initial population — all age=0 means 1 survivor.
 
     best = max(population, key=lambda x: x["fitness"])
     fitness_log = [fitnesses.copy()]   # list of arrays for plotting
@@ -193,28 +200,35 @@ def run_afpo(config, n_generations=20):
         for _ in range(n_mutants):
             parent = front[np.random.randint(len(front))]
             child  = mutate(parent)
-            child["age"]     = 0
-            child["fitness"] = None
+            child["age"]       = 0
+            child["fitness"]   = None
+            child["id"]        = new_id()
+            child["parent_id"] = parent.get("id")
             children.append(child)
 
         # Purely random new individuals (fresh blood)
         for new_ind in load_robots(num_robots=n_random):
-            new_ind["age"]     = 0
-            new_ind["fitness"] = None
+            new_ind["age"]       = 0
+            new_ind["fitness"]   = None
+            new_ind["id"]        = new_id()
+            new_ind["parent_id"] = None   # no parent — random injection
             children.append(new_ind)
 
         # 3. Evaluate all N children in one batch
         child_fitnesses, child_ctrl, child_max_m, child_max_s = evaluate_batch(children, config)
         for i, child in enumerate(children):
             fit = float(child_fitnesses[i])
-            # --- ADD THIS CHECK ---
             if np.isnan(fit):
                 fit = -9999.0
-            # ----------------------
-            child["fitness"] = fit
+            child["fitness"]        = fit
             child["control_params"] = child_ctrl[i]
-            child["max_n_masses"]  = child_max_m
-            child["max_n_springs"] = child_max_s
+            child["max_n_masses"]   = child_max_m
+            child["max_n_springs"]  = child_max_s
+            lineage_nodes[child["id"]] = {
+                "gen": gen, "fitness": fit,
+                "parent_id": child.get("parent_id"),
+                "mask": child["mask"].tolist()
+            }
 
         # 4. Merge into one pool
         pool = population + children   # up to 2N individuals
@@ -245,6 +259,10 @@ def run_afpo(config, n_generations=20):
         print(f"[Gen {gen:2d}] Best: {best['fitness']:.4f} | "
               f"Mean: {gen_fitnesses.mean():.4f} | "
               f"Pop: {len(population)} | Front: {front_size}")
+
+        # Save lineage JSON incrementally
+        with open("lineage.json", "w") as f:
+            json.dump({"nodes": lineage_nodes}, f)
 
         np.save(f"evolution_snapshots/gen_{gen}.npy",
                 {**best, "gen": gen,
