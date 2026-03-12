@@ -23,20 +23,26 @@ def build_forest(nodes):
         if pid:
             children_of.setdefault(pid, []).append({**n, "id": nid})
 
-    max_gen = max((n["gen"] for n in nodes.values()), default=0)
+    def lv(n): return n.get("level", n.get("gen", 0))
+    max_gen = max((lv(n) for n in nodes.values()), default=0)
     by_gen  = {}
     for nid, n in nodes.items():
-        by_gen.setdefault(n["gen"], []).append({**n, "id": nid})
+        by_gen.setdefault(lv(n), []).append({**n, "id": nid, "_level": lv(n)})
 
-    # Single root = best gen-0 individual that actually produced children.
-    # (The fittest gen-0 robot may have been aged out before being selected,
-    #  so we prefer the fittest one with real offspring.)
-    gen0 = [{**n, "id": nid} for nid, n in nodes.items() if n["gen"] == 0]
+    # Multi-root: best gen-0 node + any random injection that produced children
+    gen0 = [{**n, "id": nid, "_level": 0} for nid, n in nodes.items() if lv(n) == 0]
     if not gen0:
         return []
     gen0_with_kids = [n for n in gen0 if n["id"] in children_of]
     root_pool = gen0_with_kids if gen0_with_kids else gen0
-    roots = [max(root_pool, key=lambda x: x["fitness"])]
+    best_gen0 = max(root_pool, key=lambda x: x["fitness"])
+
+    random_roots = [
+        {**n, "id": nid, "_level": lv(n)} for nid, n in nodes.items()
+        if n.get("parent_id") is None and lv(n) > 0
+    ]
+
+    roots = [best_gen0] + sorted(random_roots, key=lambda x: (x["gen"], -x["fitness"]))
 
     def pick_two(pool, used):
         avail = [c for c in pool if c["id"] not in used]
@@ -53,18 +59,22 @@ def build_forest(nodes):
             return best, None
         return best, mid
 
+    sibling_pairs = []   # list of [id_a, id_b] pairs co-selected together
+
     def expand(node, used, depth=0):
         result = dict(node)
         result["best_child"] = None
         result["median_child"] = None
-        if node["gen"] >= max_gen or depth > max_gen:
+        node_lv = node.get("_level", node.get("gen", 0))
+        if node_lv >= max_gen or depth > max_gen:
             return result
-        next_gen = node["gen"] + 1
-        # Prefer direct children; fall back to whole next-gen pool so the
-        # tree never dead-ends just because this node was never selected as parent
+        next_gen = node_lv + 1
         direct = children_of.get(node["id"], [])
         pool   = direct if direct else by_gen.get(next_gen, [])
         best, mid = pick_two(pool, used)
+        if best and mid:
+            # These two were picked together — record as siblings
+            sibling_pairs.append([best["id"], mid["id"]])
         if best:
             used.add(best["id"])
             result["best_child"] = expand(best, used, depth + 1)
@@ -74,12 +84,47 @@ def build_forest(nodes):
         return result
 
     forest = []
-    for root in roots:
-        used = {root["id"]}
-        forest.append(expand(root, used))
+    # Expand gen-0 root first so random roots are still in the pool
+    # and can be naturally picked + recorded as siblings
+    gen0_root = roots[0]
+    gen0_used = {gen0_root["id"]}
+    gen0_tree = expand(gen0_root, gen0_used)
+    forest.append(gen0_tree)
 
-    forest.sort(key=lambda t: (t["gen"], -t["fitness"]))
-    return forest
+    # Expand random roots after, excluding nodes already used
+    for root in roots[1:]:
+        used = gen0_used | {root["id"]}
+        tree = expand(root, used)
+        forest.append(tree)
+
+        # ── Explicit Sibling Links via competitor_id ─────────────────────────────
+        unique_pairs = []
+        competitions = {}
+
+        # Group all nodes by their explicit competitor_id
+        for nid, n in nodes.items():
+            cid = n.get("competitor_id")
+            if cid is not None:
+                competitions.setdefault(cid, []).append(nid)
+
+        # Pair up any nodes that share an ID
+        for cid, members in competitions.items():
+            if len(members) >= 2:
+                unique_pairs.append([members[0], members[1]])
+
+        # ── Debug print ──────────────────────────────────────────────────────────
+        print(f"[dbg] {len(unique_pairs)} explicit sibling pairs found:")
+        for a, b in unique_pairs:
+            na = nodes.get(a, {})
+            nb = nodes.get(b, {})
+            la = na.get("_level", na.get("gen", "?"))
+            lb = nb.get("_level", nb.get("gen", "?"))
+            fa = na.get("fitness", 0)
+            fb = nb.get("fitness", 0)
+            print(f"[dbg]   lvl{la} fit={fa:.3f}  <-->  lvl{lb} fit={fb:.3f}  (ID: {na.get('competitor_id')})")
+
+        forest.sort(key=lambda t: (t["gen"], -t["fitness"]))
+        return forest, unique_pairs
 
 
 def tree_depth(node):
@@ -152,7 +197,7 @@ canvas.drag { cursor:grabbing; }
 #popup {
   position:fixed; display:none; flex-direction:column; gap:0;
   background:var(--ui-bg); border:1px solid var(--border);
-  border-radius:10px; padding:10px; z-index:30; min-width:220px;
+  border-radius:10px; padding:10px; z-index:30; min-width:420px;
   box-shadow: 0 4px 24px rgba(0,0,0,0.4);
   pointer-events:none;
 }
@@ -170,6 +215,7 @@ canvas.drag { cursor:grabbing; }
     <button id="bzout">－</button>
     <span id="zlbl">100%</span>
     <button id="brst">Reset</button>
+    <button id="bsib" title="Toggle sibling links" style="opacity:1">✕ siblings</button>
     <button id="theme-btn" title="Toggle light/dark">🌙</button>
   </div>
   <div id="legend">
@@ -186,12 +232,13 @@ canvas.drag { cursor:grabbing; }
 
 <div id="popup">
   <div id="popup-title">—</div>
-  <canvas id="anim-canvas" width="200" height="160"></canvas>
+  <canvas id="anim-canvas" width="400" height="320"></canvas>
   <div id="popup-fitness">—</div>
 </div>
 
 <script>
 const forest = {{ forest_json | safe }};
+const siblingPairs = {{ sibling_pairs_json | safe }};
 const minFit = {{ min_fit }};
 const maxFit = {{ max_fit }};
 const isDark = () => document.documentElement.getAttribute("data-theme") === "dark";
@@ -222,7 +269,8 @@ function assignXY(n, xc, yTop) {
 let xCur=TGAP;
 for (const t of forest) {
   const w=subW(t);
-  assignXY(t, xCur+w/2, t.gen*VGAP);
+  const rootLv=(t._level!==undefined)?t._level:t.gen;
+  assignXY(t, xCur+w/2, rootLv*VGAP);
   xCur+=w+TGAP;
 }
 
@@ -283,7 +331,8 @@ let drawn=0;
 function drawNode(n, isRoot){
   drawn++;
   const x=sx(n._x),y=sy(n._y),r=sr(NR);
-  const isRand=n.gen>0&&!n.parent_id, dark=isDark();
+  const nodeLevel = n._level !== undefined ? n._level : n.gen;
+  const isRand = nodeLevel > 0 && !n.parent_id, dark=isDark();
   // glow
   const gl=ctx.createRadialGradient(x,y,r*0.1,x,y,r+8*scale);
   gl.addColorStop(0,fc(n.fitness,dark?0.3:0.15)); gl.addColorStop(1,"transparent");
@@ -299,7 +348,9 @@ function drawNode(n, isRoot){
     ctx.textAlign="center";
     ctx.fillText(n.fitness.toFixed(3),x,y+r+12*scale);
     ctx.fillStyle=dark?"#555":"#999"; ctx.font=`${Math.round(9*scale)}px monospace`;
-    ctx.fillText("gen"+n.gen+(isRand?" ★rnd":""),x,y+r+22*scale);
+    const isLeaf = !n.best_child && !n.median_child;
+    const leafMark = isLeaf && nodeLevel < {{ max_gen }} ? " ✕" : "";
+    ctx.fillText("lvl"+nodeLevel+(isRand?" ★rnd":"")+leafMark,x,y+r+22*scale);
   }
 }
 
@@ -348,18 +399,32 @@ function drawSubtree(n,isRoot){
   if (n.best_child && n.median_child) {
     const sameParent = n.best_child.parent_id &&
                        n.best_child.parent_id === n.median_child.parent_id;
-    if (!sameParent) {
+    if (!sameParent && showSiblings) {
       drawSiblingLink(n.best_child, n.median_child);
     }
   }
   drawNode(n,isRoot);
 }
 
+function drawCrossGenSiblingLinks() {
+  // Build an id -> node lookup from ALL nodes in the forest
+  const byId = {};
+  for (const n of allN) byId[n.id] = n;
+
+  // Draw sibling link for every co-selected pair recorded during tree building
+  for (const [idA, idB] of siblingPairs) {
+    const a = byId[idA], b = byId[idB];
+    if (a && b) drawSiblingLink(a, b);
+  }
+}
+
 function render(){
   drawn=0; ctx.clearRect(0,0,W,H);
-  try{ for(const t of forest) drawSubtree(t,true);
-       document.getElementById("dbn").textContent=drawn;
-       document.getElementById("dbe").textContent="";
+  try{
+    for(const t of forest) drawSubtree(t,true);
+    if (showSiblings) drawCrossGenSiblingLinks();
+    document.getElementById("dbn").textContent=drawn;
+    document.getElementById("dbe").textContent="";
   }catch(e){ document.getElementById("dbe").textContent=e; console.error(e); }
   document.getElementById("zlbl").textContent=Math.round(scale*100)+"%";
 }
@@ -384,6 +449,12 @@ document.getElementById("bfit").onclick  = fitAll;
 document.getElementById("bzin").onclick  = ()=>{ scale*=1.2; render(); };
 document.getElementById("bzout").onclick = ()=>{ scale*=0.83; render(); };
 document.getElementById("brst").onclick  = ()=>{ scale=1; tx=0; ty=60; render(); };
+let showSiblings = true;
+document.getElementById("bsib").onclick  = ()=>{
+  showSiblings = !showSiblings;
+  document.getElementById("bsib").style.opacity = showSiblings ? "1" : "0.35";
+  render();
+};
 document.getElementById("theme-btn").onclick = ()=>{
   const html=document.documentElement;
   const next=isDark()?"light":"dark";
@@ -396,7 +467,7 @@ document.getElementById("theme-btn").onclick = ()=>{
 const popup    = document.getElementById("popup");
 const animC    = document.getElementById("anim-canvas");
 const animCtx  = animC.getContext("2d");
-const AW=200, AH=160;
+const AW=400, AH=320;
 let animFrame  = null;
 let animNode   = null;
 let animT      = 0;
@@ -420,8 +491,10 @@ function startAnim(node, screenX, screenY){
   if(py<10) py=10;
   popup.style.left=px+"px"; popup.style.top=py+"px";
 
+  const nodeLv = (node._level !== undefined) ? node._level : node.gen;
+  const nodeIsRand = nodeLv > 0 && !node.parent_id;
   document.getElementById("popup-title").textContent=
-    `Gen ${node.gen} · ${node.parent_id?"child":"root"}`;
+    `Level ${nodeLv}${nodeIsRand?" ★rnd":""} · ${node.parent_id?"child":"root"}`;
   document.getElementById("popup-fitness").textContent=
     `fitness: ${node.fitness.toFixed(4)}`;
 
@@ -536,7 +609,7 @@ def index():
         has_traj = sum(1 for n in by_gen[g] if n.get("traj"))
         print(f"[srv]  gen{g}: {len(by_gen[g])} nodes, {has_traj} with traj, fits={fits}", flush=True)
 
-    forest = build_forest(nodes)
+    forest, sibling_pairs = build_forest(nodes)
     print(f"[srv] forest={len(forest)} trees", flush=True)
     for i,t in enumerate(forest):
         print(f"[srv]  tree{i}: root=gen{t['gen']} fit={t['fitness']:.3f} depth={tree_depth(t)}", flush=True)
@@ -546,7 +619,7 @@ def index():
     max_fit  = max(all_fits) if all_fits else 1.0
 
     return render_template_string(HTML,
-        forest_json=json.dumps(forest), min_fit=min_fit, max_fit=max_fit)
+        forest_json=json.dumps(forest), sibling_pairs_json=json.dumps(sibling_pairs), min_fit=min_fit, max_fit=max_fit, max_gen=max(n.get('level', n.get('gen',0)) for n in nodes.values()) if nodes else 0)
 
 
 if __name__ == "__main__":

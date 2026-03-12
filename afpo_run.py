@@ -30,6 +30,8 @@ from robot import load_robots, build_robot, sample_mask, shift_mask, perturb_p
 import numpy as np
 import os, json
 from scipy import ndimage
+import uuid                                 # <--- NEW
+from collections import defaultdict         # <--- NEW
 
 # ── Mutation hyper-parameters ─────────────────────────────────────────────────
 FLIP_RATE   = 0.15   # per-voxel flip probability (fixed, AFPO handles diversity)
@@ -83,15 +85,59 @@ def build_simulator(robots, config):
     return sim, max_masses, max_springs
 
 
+
+# ── Balance fitness helpers ───────────────────────────────────────────────────
+FALL_THRESHOLD = 0.55
+BALANCE_WEIGHT = 0.4
+
+def compute_balance_scores(sim, n_robots):
+    positions = sim.x.to_numpy()
+    n_steps   = int(sim.steps[None])
+    scores    = np.zeros(n_robots, dtype=np.float32)
+    for i in range(n_robots):
+        n_m   = int(sim.n_masses[i])
+        com_y = positions[i, :n_steps + 1, :n_m, 1].mean(axis=1)
+        h0    = float(com_y[0])
+        if h0 < 1e-6:
+            scores[i] = 0.0
+            continue
+        upright_frac = float((com_y > FALL_THRESHOLD * h0).mean())
+        height_ratio = float(np.clip(com_y.mean() / h0, 0.0, 1.5))
+        scores[i]    = upright_frac * height_ratio
+    return scores
+
+def composite_fitness(forward, balance):
+    forward = np.clip(np.array(forward, dtype=np.float64), 0.0, None)
+    balance = np.clip(np.array(balance, dtype=np.float64), 0.0, 1.0)
+    return forward * (1.0 + BALANCE_WEIGHT * balance)
+
+def extract_trajectories(sim, robots, step=25):
+    """Downsample position trajectory for each robot (for animation)."""
+    trajs = []
+    n_steps = int(sim.steps[None])
+    all_pos = sim.x.to_numpy()   # (n_sims, steps+1, max_masses, 2)
+    for i, robot in enumerate(robots):
+        n_m = int(sim.n_masses[i])
+        frames = []
+        for t in range(0, n_steps + 1, step):
+            pos = all_pos[i, t, :n_m].tolist()
+            pos = [[0.0 if (p[0]!=p[0]) else float(p[0]),
+                    0.0 if (p[1]!=p[1]) else float(p[1])] for p in pos]
+            frames.append(pos)
+        trajs.append({"positions": frames, "springs": robot["springs"].tolist(), "step": step})
+    return trajs
+
+
 def evaluate_batch(robots, config):
-    """
-    Train a batch of robots and return (fitnesses, control_params, max_masses, max_springs).
-    """
+    """Train a batch; return (fitnesses, control_params, max_masses, max_springs, trajs)."""
     sim, max_masses, max_springs = build_simulator(robots, config)
     fitness_history = sim.train()
-    fitnesses       = fitness_history[:, -1]
+    forward         = fitness_history[:, -1]
+    balance         = compute_balance_scores(sim, len(robots))
+    fitnesses       = composite_fitness(forward, balance)
     control_params  = sim.get_control_params(list(range(len(robots))))
-    return fitnesses, control_params, max_masses, max_springs
+    trajs           = extract_trajectories(sim, robots)
+    return fitnesses, control_params, max_masses, max_springs, trajs
 
 
 # ── Pareto helpers ────────────────────────────────────────────────────────────
@@ -153,7 +199,7 @@ def run_afpo(config, n_generations=20):
     # ── Initialise ────────────────────────────────────────────────────────────
     print("Initializing population (gen 0)...")
     population = load_robots(num_robots=N)
-    fitnesses, ctrl_params, max_m, max_s = evaluate_batch(population, config)
+    fitnesses, ctrl_params, max_m, max_s, pop_trajs = evaluate_batch(population, config)
 
     for i, ind in enumerate(population):
         fit = float(fitnesses[i])
@@ -167,8 +213,9 @@ def run_afpo(config, n_generations=20):
         ind["id"]            = new_id()
         ind["parent_id"]     = None
         lineage_nodes[ind["id"]] = {
-            "gen": 0, "fitness": fit, "parent_id": None,
-            "mask": ind["mask"].tolist()
+            "gen": 0, "level": 0, "fitness": fit, "parent_id": None,
+            "mask": ind["mask"].tolist(),
+            "traj": pop_trajs[i] if i < len(pop_trajs) else None
         }
 
     # Do NOT Pareto-cull the initial population — all age=0 means 1 survivor.
@@ -215,19 +262,50 @@ def run_afpo(config, n_generations=20):
             children.append(new_ind)
 
         # 3. Evaluate all N children in one batch
-        child_fitnesses, child_ctrl, child_max_m, child_max_s = evaluate_batch(children, config)
+        child_fitnesses, child_ctrl, child_max_m, child_max_s, child_trajs = evaluate_batch(children, config)
         for i, child in enumerate(children):
             fit = float(child_fitnesses[i])
             if np.isnan(fit):
                 fit = -9999.0
-            child["fitness"]        = fit
+            child["fitness"] = fit
             child["control_params"] = child_ctrl[i]
-            child["max_n_masses"]   = child_max_m
-            child["max_n_springs"]  = child_max_s
+            child["max_n_masses"] = child_max_m
+            child["max_n_springs"] = child_max_s
+
+        # --- NEW: Assign shared competitor_id to best and median siblings ---
+        children_by_parent = defaultdict(list)
+        for child in children:
+            children_by_parent[child.get("parent_id")].append(child)
+
+        for pid, siblings in children_by_parent.items():
+            if len(siblings) >= 2:
+                # Sort siblings by fitness
+                sibs_sorted = sorted(siblings, key=lambda x: x["fitness"])
+                best_child = sibs_sorted[-1]
+
+                # Find median
+                mid_idx = len(sibs_sorted) // 2
+                median_child = sibs_sorted[mid_idx]
+
+                # Fallback if median and best are the exact same node
+                if median_child["id"] == best_child["id"]:
+                    mid_idx = max(0, len(sibs_sorted) // 2 - 1)
+                    median_child = sibs_sorted[mid_idx]
+
+                if best_child["id"] != median_child["id"]:
+                    shared_id = str(uuid.uuid4())
+                    best_child["competitor_id"] = shared_id
+                    median_child["competitor_id"] = shared_id
+        # --------------------------------------------------------------------
+
+        # Save to lineage JSON (Now explicitly including competitor_id)
+        for i, child in enumerate(children):
             lineage_nodes[child["id"]] = {
-                "gen": gen, "fitness": fit,
+                "gen": gen, "level": gen, "fitness": child["fitness"],
                 "parent_id": child.get("parent_id"),
-                "mask": child["mask"].tolist()
+                "competitor_id": child.get("competitor_id"),  # <--- NEW: Saved to JSON
+                "mask": child["mask"].tolist(),
+                "traj": child_trajs[i] if i < len(child_trajs) else None
             }
 
         # 4. Merge into one pool
