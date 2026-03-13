@@ -1,4 +1,4 @@
 *.npy
 *.cpython*
 *.pyc
-/pycache/
+/pycache/.idea/

@@ -526,7 +526,8 @@ for (const t of splicedTrees) {
 function fc(fitness, alpha) {
   if (fitness<=-999) return alpha!=null?`rgba(120,120,120,${alpha})`:"#777";
   const t=Math.max(0,Math.min(1,(fitness-minFit)/(maxFit-minFit+1e-9)));
-  const r=Math.round(220*(1-t)+30*t), g=Math.round(60*(1-t)+210*t), b=60;
+  // Pushed the colors to be vivid neon green (high) and stark red (low)
+  const r=Math.round(240*(1-t)+20*t), g=Math.round(40*(1-t)+240*t), b=40;
   return alpha!=null?`rgba(${r},${g},${b},${alpha})`:`rgb(${r},${g},${b})`;
 }
 
@@ -554,14 +555,18 @@ const sx=x=>x*scale+tx, sy=y=>y*scale+ty, sr=r=>r*scale;
 function drawEdge(p,c,lbl){
   const px=sx(p._x),py=sy(p._y),cx2=sx(c._x),cy2=sy(c._y);
   const g=ctx.createLinearGradient(px,py,cx2,cy2);
-  const alpha = isDark() ? 0.55 : 0.7;
+  // Increased opacity from 0.55/0.70 to 0.85/0.95
+  const alpha = isDark() ? 0.85 : 0.95;
   g.addColorStop(0,fc(p.fitness,alpha)); g.addColorStop(1,fc(c.fitness,alpha));
   ctx.beginPath(); ctx.moveTo(px,py);
   ctx.quadraticCurveTo((px+cx2)/2, py+20*scale, cx2,cy2);
-  ctx.strokeStyle=g; ctx.lineWidth=Math.max(1,1.4*scale);
-  ctx.setLineDash([4*scale,4*scale]); ctx.stroke(); ctx.setLineDash([]);
+  ctx.strokeStyle=g; 
+  // Significantly thicker lines
+  ctx.lineWidth=Math.max(1.5, 2.5*scale);
+  ctx.setLineDash([5*scale, 4*scale]); ctx.stroke(); ctx.setLineDash([]);
+  
   if(scale>0.45){
-    ctx.fillStyle=isDark()?"#555":"#999"; ctx.font=`${Math.round(9*scale)}px monospace`;
+    ctx.fillStyle=isDark()?"#777":"#555"; ctx.font=`bold ${Math.round(10*scale)}px monospace`;
     ctx.textAlign="center";
     ctx.fillText(lbl,(px+cx2)/2+(c._x<p._x?-8*scale:8*scale),py+24*scale);
   }
@@ -596,12 +601,15 @@ function drawNode(n, isRoot){
   ctx.fillStyle = dark ? "#ffffff" : "#0d0d1a"; ctx.fill(); // Swapped!
   
   let strokeCol = fc(n.fitness);
-  if (isRoot && n.gen===0) strokeCol = "#4466ff";
-  else if (isRand) strokeCol = "#cc88ff";
-  else if (n.custom_drawn) strokeCol = "#ffaa00";
+  // Dark mode gets bright neon colors, Light mode gets deep, highly saturated colors
+  if (isRoot && n.gen===0) strokeCol = dark ? "#5588ff" : "#0033cc";
+  else if (isRand) strokeCol = dark ? "#dd66ff" : "#9900cc";
+  else if (n.custom_drawn) strokeCol = dark ? "#ffaa00" : "#cc6600";
   
   ctx.strokeStyle=strokeCol;
-  ctx.lineWidth=(isRoot?2.5:1.5)*scale; ctx.stroke();
+  // Thickened the borders around the circular nodes!
+  ctx.lineWidth=(isRoot ? 4.0 : 2.5) * scale; 
+  ctx.stroke();
   drawMask(x,y-4*scale,n.mask);
   
   if(scale>0.32){
@@ -624,30 +632,31 @@ function drawSiblingLink(a, b) {
   const dark=isDark();
 
   ctx.save();
-  ctx.setLineDash([5*scale, 4*scale]);
-  ctx.strokeStyle = dark ? "rgba(180,180,255,0.45)" : "rgba(80,80,180,0.45)";
-  ctx.lineWidth = Math.max(1, scale);
+  ctx.setLineDash([6*scale, 5*scale]);
+  // Replaced faint purple with a highly visible, mostly-solid blue/indigo
+  ctx.strokeStyle = dark ? "rgba(160,180,255,0.9)" : "rgba(40,60,200,0.9)";
+  ctx.lineWidth = Math.max(1.5, 2.5 * scale); // Thicker line
   ctx.beginPath();
   ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
   ctx.stroke();
   ctx.setLineDash([]);
   ctx.restore();
 
-  const xSize = Math.max(4, 5*scale);
-  const col = dark ? "rgba(180,180,255,0.7)" : "rgba(80,80,200,0.7)";
+  const xSize = Math.max(5, 6*scale); // Bigger 'X' marks
+  const col = dark ? "rgba(160,180,255,1.0)" : "rgba(40,60,200,1.0)";
   for (const [px2,py2] of [[ax,ay],[mx,my],[bx,by]]) {
     ctx.save();
-    ctx.strokeStyle=col; ctx.lineWidth=Math.max(1,1.2*scale);
+    ctx.strokeStyle=col; ctx.lineWidth=Math.max(1.5, 3.0*scale); // Thicker 'X' strokes
     ctx.beginPath(); ctx.moveTo(px2-xSize,py2-xSize); ctx.lineTo(px2+xSize,py2+xSize); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(px2+xSize,py2-xSize); ctx.lineTo(px2-xSize,py2+xSize); ctx.stroke();
     ctx.restore();
   }
 
   if (scale > 0.5) {
-    ctx.fillStyle = dark ? "rgba(180,180,255,0.6)" : "rgba(80,80,200,0.6)";
-    ctx.font = `${Math.round(9*scale)}px monospace`;
+    ctx.fillStyle = dark ? "rgba(160,180,255,0.9)" : "rgba(40,60,200,0.9)";
+    ctx.font = `bold ${Math.round(10*scale)}px monospace`;
     ctx.textAlign = "center";
-    ctx.fillText("siblings", mx, my - 8*scale);
+    ctx.fillText("siblings", mx, my - 10*scale);
   }
 }
 
@@ -661,21 +670,23 @@ function drawSpliceLinks() {
       const p2 = byId[n.splice_parents[1]];
       const cx = sx(n._x), cy = sy(n._y);
       
-      ctx.lineWidth = 2 * scale;
-      ctx.setLineDash([8 * scale, 6 * scale]);
+      // Much thicker DAG lines!
+      ctx.lineWidth = 3.5 * scale; 
+      ctx.setLineDash([10 * scale, 8 * scale]);
       
       if (p1) {
         const p1x = sx(p1._x), p1y = sy(p1._y);
         ctx.beginPath(); ctx.moveTo(p1x, p1y);
         ctx.bezierCurveTo(p1x, p1y + VGAP/1.5 * scale, cx, cy - VGAP/1.5 * scale, cx, cy);
-        ctx.strokeStyle = "rgba(255, 100, 200, 0.7)";
+        // Boosted opacity to 0.95 and deepened the colors
+        ctx.strokeStyle = isDark() ? "rgba(255, 80, 200, 0.95)" : "rgba(220, 0, 150, 0.95)";
         ctx.stroke();
       }
       if (p2) {
         const p2x = sx(p2._x), p2y = sy(p2._y);
         ctx.beginPath(); ctx.moveTo(p2x, p2y);
         ctx.bezierCurveTo(p2x, p2y + VGAP/1.5 * scale, cx, cy - VGAP/1.5 * scale, cx, cy);
-        ctx.strokeStyle = "rgba(100, 200, 255, 0.7)";
+        ctx.strokeStyle = isDark() ? "rgba(80, 200, 255, 0.95)" : "rgba(0, 150, 220, 0.95)";
         ctx.stroke();
       }
       ctx.setLineDash([]);
