@@ -73,6 +73,8 @@ A dedicated, full-screen playback tool designed for capturing video montages of 
 * For each generation, shows a **before-training** phase (random control network) followed by an **after-training** phase (learned gait), illustrating the power of the optimizer.
 * Includes keyboard controls for variable playback speed (down to `0.1x` slow-motion), generation skipping, and UI hiding for clean screen recording.
 
+![Evolution Montage](videos/evolution_montage_feature.gif)
+
 ---
 
 ## Installation
