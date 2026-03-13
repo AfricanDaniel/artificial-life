@@ -2,3 +2,7 @@
 *.cpython*
 *.pyc
 /pycache/.idea/
+
+# Videos (raw/untrimmed)
+videos/*.webm
+videos/*.mp4
